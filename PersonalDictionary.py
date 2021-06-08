@@ -1,8 +1,13 @@
+#!/usr/bin/python3
+
 import configparser
 import os
 import sqlite3
 import itertools
 import re
+import requests
+import json
+import click
 
 
 def get_firefox_config():
@@ -67,8 +72,36 @@ class Crawler:
 
 class DictionaryConnection:
 
-    def __init__(self, output_dir):
-        self.apikey = None
+    endpoints = {
+        'Dictionary': 'https://www.dictionaryapi.com/api/v3/references/collegiate/json/',
+        'Thesaurus': 'https://www.dictionaryapi.com/api/v3/references/thesaurus/json/'
+    }
 
+    def __init__(self, output_dir=os.path.join(os.environ["HOME"], '.personaldictionary')):
+        api_config = configparser.ConfigParser()
+        api_config.read(".keys")
+
+        self.config = api_config
+        self.outdir = output_dir
+
+    def _check_dictionary(self, word, endpoint='Dictionary'):
+        url = self.endpoints[endpoint]
+
+        res = requests.get(
+            url + word,
+            {'key': self.config.get('Merriam-Webster', endpoint)}
+            )
+
+        res.raise_for_status()
+
+        parsed = res.json()
+
+        return parsed
+
+    def _save_word(self, response):
+        pass
+
+    def check_word(self, word, force=False):
+        pass
 
 
