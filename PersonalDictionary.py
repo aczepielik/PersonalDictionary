@@ -9,6 +9,7 @@ import shutil
 import requests
 import json
 import click
+from datetime import datetime
 from urllib.parse import urlparse, parse_qs, unquote_plus
 import nltk
 from nltk import word_tokenize
@@ -62,12 +63,21 @@ class Crawler:
         'google': extract_google
     }
 
-    def __init__(self, profile='Profile0'):
+    def __init__(self, profile='Profile0', dir=os.path.join(os.environ["HOME"], '.personaldictionary')):
+        
         self.config = get_firefox_config()
         self.profile = profile
         self.db = get_firefox_history_db(self.config, self.profile)
 
         self.connected = False
+
+        self.dir = dir
+
+        if os.path.exists(os.path.join(self.dir, 'last_check')):
+            with open(os.path.join(self.dir, 'last_check'), 'r') as file:
+                self.last_check = file.readline()
+        else:
+            self.last_check = 0
     
     def connect(self):
         self.conn = sqlite3.connect(self.db) # add error handling
@@ -77,33 +87,52 @@ class Crawler:
         self.conn.close()
         self.connected = False
 
-    def _get_addresses_from_site(self, url, date):
+    def update_last_check(self):
+        self.last_check = int(datetime.now().timestamp() * 1e06)
+        with open(os.path.join(self.dir, 'last_check'), 'w') as file:
+                file.write(str(self.last_check))
+
+    def _get_addresses_from_site(self, url, timestamp):
 
         assert self.connected
         cur = self.conn.cursor()
 
-        cur.execute("SELECT url FROM moz_places WHERE url LIKE :ref_url", {"ref_url": url})
+        cur.execute("""
+        SELECT url 
+        FROM moz_places 
+        WHERE 
+        url LIKE :ref_url 
+        AND last_visit_date > :timestamp
+        """,
+        {"ref_url": url, "timestamp": int(timestamp)})
         data = cur.fetchall()
 
         cur.close()
+        self.update_last_check()
+
         return data
     
-    def _get_addresses(self, date):
+    def _get_addresses(self, timestamp):
         
-        addresses = {service: list(sum(self._get_addresses_from_site(url, date), ()))
+        addresses = {service: list(sum(self._get_addresses_from_site(url, timestamp), ()))
             for service, url in self.dictionary_urls.items()}
         return addresses
 
-    def get_queries(self, date=None):
-        urls = self._get_addresses(date)
+    def get_queries(self, timestamp=None):
+        
+        if timestamp is None:
+            timestamp = self.last_check 
+        
+        urls = self._get_addresses(timestamp)
 
         raw_queries = [self.extraction_functions[key](value) for key, values in urls.items() for value in values]
+        
         tokenized_queries = [word_tokenize(phrase.lower().replace('\\n', '')) for phrase in raw_queries]
+        
         cleaned_queries = [word for word in set(sum(tokenized_queries, []))
             if word not in STOP_WORDS and word.isalnum()]
         
-        lemmas = [lemmatizer.lemmatize(word) for word in cleaned_queries if lemmatizer.lemmatize(word) != word]
-        return cleaned_queries + lemmas
+        return cleaned_queries
 
 class DictionaryConnection:
 
@@ -193,7 +222,7 @@ class DictionaryConnection:
 
 
     def check_word(self, word, force=False, prompt=True, save=True):
-
+        # to do: adopt to one to many relation
         if not force:
             entry = self._check_cache(word)
             from_cache = True
@@ -215,16 +244,33 @@ if __name__ == "__main__":
     Crw = Crawler()
     Crw.connect()
 
-    queries = Crw.get_queries()
+    print(Crw.last_check)
+    Crw.last_check = 0
+    
+    query1 = Crw.get_queries()
+    print(len(query1))
+
+    print(Crw.last_check)
+    #queries = Crw.get_queries()
 
     Crw.disconnect()
+
+    Crw2 = Crawler()
+
+    print(Crw2.last_check)
+    Crw2.connect()
+
+    query2 = Crw2.get_queries()
+    print(len(query2))
+
+    print(Crw2.last_check)
     
-    MW = DictionaryConnection()
+    #MW = DictionaryConnection()
 
-    for word in queries[:5]:
-        MW.check_word(word)
+    #for word in queries[:5]:
+    #    MW.check_word(word)
 
-    MW.clear_dictionary()
+    #MW.clear_dictionary()
 
 
 
