@@ -1,13 +1,22 @@
-#!/usr/bin/python3
+#!/home/adam/anaconda3/envs/personaldict/bin/python
 
 import configparser
 import os
 import sqlite3
 import itertools
 import re
+import shutil
 import requests
 import json
 import click
+from urllib.parse import urlparse, parse_qs, unquote_plus
+import nltk
+from nltk import word_tokenize
+from nltk.corpus import stopwords
+from nltk.stem import WordNetLemmatizer
+  
+lemmatizer = WordNetLemmatizer()
+STOP_WORDS = stopwords.words('english')
 
 
 def get_firefox_config():
@@ -29,12 +38,29 @@ def get_firefox_history_db(firefox_config, profile='Profile0'):
 
     return os.path.join(home, '.mozilla', 'firefox', dir, 'places.sqlite')
 
+def extract_google(url):
+    parsed_url = urlparse(url)
+    phrase = parse_qs(parsed_url.query).get('text')
+
+    return unquote_plus(' '.join(phrase))
+
+def extract_deepl(url):
+    parsed_url = urlparse(url)
+    phrase = parsed_url.fragment.replace('en/pl/', '')
+
+    return unquote_plus(phrase)
+
 class Crawler:
 
-    dictionary_urls = (
-        'http%://%deepl.com/translator#en/pl/%',
-        'https%://%translate.google.pl/?sl=en&tl=pl&text=%'
-    )
+    dictionary_urls = {
+        'deepl': 'http%://%deepl.com/translator#en/pl/%',
+        'google': 'https%://%translate.google.pl/?sl=en&tl=pl&text=%'
+    }
+
+    extraction_functions = {
+        'deepl': extract_deepl,
+        'google': extract_google
+    }
 
     def __init__(self, profile='Profile0'):
         self.config = get_firefox_config()
@@ -64,11 +90,20 @@ class Crawler:
     
     def _get_addresses(self, date):
         
-        addresses = map(lambda x: self._get_addresses_from_site(x, date), self.dictionary_urls)
-        return list(itertools.chain(addresses))
+        addresses = {service: list(sum(self._get_addresses_from_site(url, date), ()))
+            for service, url in self.dictionary_urls.items()}
+        return addresses
 
-    def get_queries(self, date):
-        pass
+    def get_queries(self, date=None):
+        urls = self._get_addresses(date)
+
+        raw_queries = [self.extraction_functions[key](value) for key, values in urls.items() for value in values]
+        tokenized_queries = [word_tokenize(phrase.lower().replace('\\n', '')) for phrase in raw_queries]
+        cleaned_queries = [word for word in set(sum(tokenized_queries, []))
+            if word not in STOP_WORDS and word.isalnum()]
+        
+        lemmas = [lemmatizer.lemmatize(word) for word in cleaned_queries if lemmatizer.lemmatize(word) != word]
+        return cleaned_queries + lemmas
 
 class DictionaryConnection:
 
@@ -87,8 +122,17 @@ class DictionaryConnection:
         self.config = api_config
         self.dir = dir
 
-        with open(self.meta_dict_path, 'r') as file:
-            self.meta_dict = json.load(file)
+        if os.path.exists(self.meta_dict_path):
+            with open(self.meta_dict_path, 'r') as file:
+                self.meta_dict = json.load(file)
+        else:
+            self.meta_dict = {}
+            with open(self.meta_dict_path, 'w') as meta_file:
+                json.dump(self.meta_dict, meta_file)
+
+        if not os.path.exists(os.path.join(self.dir, '.data')):
+            os.mkdir(os.path.join(self.dir, '.data'))
+
 
     def _check_dictionary(self, word, endpoint='Dictionary'):
         url = self.endpoints[endpoint]
@@ -101,6 +145,8 @@ class DictionaryConnection:
         res.raise_for_status()
 
         parsed = res.json()
+
+        # raise error for bad response
 
         return parsed
 
@@ -124,8 +170,27 @@ class DictionaryConnection:
             
         self.meta_dict[word] = os.path.join(".data", word + '.json')
 
-        with open(self.meta_dict_path, 'w+') as meta_file:
+        with open(self.meta_dict_path, 'w') as meta_file:
             json.dump(self.meta_dict, meta_file)
+
+    def remove_word(self, word):
+        word_path = os.path.join(self.dir, ".data", word + '.json')
+        assert os.path.exists(word_path)
+        os.remove(word_path)
+
+        self.meta_dict.pop(word)
+
+        with open(self.meta_dict_path, 'w') as meta_file:
+            json.dump(self.meta_dict, meta_file)
+
+    def clear_dictionary(self):
+        shutil.rmtree(os.path.join(self.dir, ".data"))
+        
+        self.meta_dict = {}
+
+        with open(self.meta_dict_path, 'w') as meta_file:
+            json.dump(self.meta_dict, meta_file)
+
 
     def check_word(self, word, force=False, prompt=True, save=True):
 
@@ -136,7 +201,7 @@ class DictionaryConnection:
             entry = None
         
         if entry is None:
-            entry = self._check_dictionary(word)
+            entry = self._check_dictionary(word) # to do: add error handling
             from_cache = False
 
         if prompt:
@@ -146,11 +211,20 @@ class DictionaryConnection:
             self._save_word(word, entry)
 
 if __name__ == "__main__":
+
+    Crw = Crawler()
+    Crw.connect()
+
+    queries = Crw.get_queries()
+
+    Crw.disconnect()
     
     MW = DictionaryConnection()
 
-    MW.check_word('voluminous')
-    MW.check_word('voluminous')
+    for word in queries[:5]:
+        MW.check_word(word)
+
+    MW.clear_dictionary()
 
 
 
