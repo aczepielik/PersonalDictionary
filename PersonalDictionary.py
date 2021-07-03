@@ -3,8 +3,6 @@
 import configparser
 import os
 import sqlite3
-import itertools
-import re
 import shutil
 import requests
 import json
@@ -14,9 +12,8 @@ from urllib.parse import urlparse, parse_qs, unquote_plus
 import nltk
 from nltk import word_tokenize
 from nltk.corpus import stopwords
-from nltk.stem import WordNetLemmatizer
   
-lemmatizer = WordNetLemmatizer()
+
 STOP_WORDS = stopwords.words('english')
 
 
@@ -80,8 +77,13 @@ class Crawler:
             self.last_check = 0
     
     def connect(self):
-        self.conn = sqlite3.connect(self.db) # add error handling
-        self.connected = True
+        try:
+            self.conn = sqlite3.connect(self.db) # add error handling
+            self.connected = True
+        except sqlite3.OperationalError as e:
+            print('Cannot connect to browser history')
+            print(e)
+            exit()
 
     def disconnect(self):
         self.conn.close()
@@ -143,7 +145,7 @@ class DictionaryConnection:
 
     def __init__(self, dir=os.path.join(os.environ["HOME"], '.personaldictionary')):
         api_config_path = os.path.join(dir, ".keys")
-        self.meta_dict_path = os.path.join(dir, 'meta.json')
+        self.meta_dict_path = os.path.join(dir, 'meta.db')
 
         api_config = configparser.ConfigParser()
         api_config.read(api_config_path)
@@ -151,16 +153,33 @@ class DictionaryConnection:
         self.config = api_config
         self.dir = dir
 
-        if os.path.exists(self.meta_dict_path):
-            with open(self.meta_dict_path, 'r') as file:
-                self.meta_dict = json.load(file)
-        else:
-            self.meta_dict = {}
-            with open(self.meta_dict_path, 'w') as meta_file:
-                json.dump(self.meta_dict, meta_file)
+        try:
+            self.meta_dict = sqlite3.connect(self.meta_dict_path)
+            cur = self.meta_dict.cursor()
 
-        if not os.path.exists(os.path.join(self.dir, '.data')):
-            os.mkdir(os.path.join(self.dir, '.data'))
+            create_words_table = """
+            CREATE TABLE IF NOT EXISTS words (
+                id integer PRIMARY KEY,
+                word text NOT NULL,
+                entry_id text NOT NULL
+            );
+            """
+
+            create_word_entries_table = """
+            CREATE TABLE IF NOT EXISTS word_entries (
+                entry_id text PRIMARY KEY,
+                file text
+            )
+            """
+
+            cur.execute(create_words_table)
+            cur.execute(create_word_entries_table)
+            cur.close()
+
+        except sqlite3.OperationalError as e:
+            print('Cannot connect to local disctionary')
+            print(e)
+            exit()
 
 
     def _check_dictionary(self, word, endpoint='Dictionary'):
@@ -175,54 +194,133 @@ class DictionaryConnection:
 
         parsed = res.json()
 
-        # raise error for bad response
+        if len(parsed) == 0:
+            raise ValueError
+        elif not isinstance(parsed[0], dict):
+            raise ValueError
+        elif not ('meta' in parsed[0].keys()):
+            raise ValueError
+        else:
+            return parsed
 
-        return parsed
+    def _check_metadict(self, word):
+        cur = self.meta_dict.cursor()
+        
+        cur.execute("""
+        SELECT file
+        FROM words
+        LEFT JOIN  word_entries
+        ON words.entry_id = word_entries.entry_id
+        WHERE 
+        words.word = :word
+        """,
+        {"word": word})
+
+        data = cur.fetchall()
+        cur.close()
+
+        return data
 
     def _check_cache(self, word):
-        if word in self.meta_dict:
-            entry_file= self.meta_dict.get(word)
-            entry_path = os.path.join(self.dir, entry_file)
+        files = self._check_metadict(word)
 
-            with open(entry_path, 'r') as file:
-                entry = json.load(file)
-
-            return entry
-        else:
+        if len(files) == 0:
             return None
-
-    def _save_word(self, word, entry):
-        word_path = os.path.join(self.dir, ".data", word + '.json')
-
-        with open(word_path, 'w+') as file:
-            json.dump(entry, file)
+        else:
+            results = []
+            for file in files:
+                with open(os.path.join(self.dir, '.data', file[0]), 'r') as f:
+                    results.append(json.load(f))
             
-        self.meta_dict[word] = os.path.join(".data", word + '.json')
+            return results
 
-        with open(self.meta_dict_path, 'w') as meta_file:
-            json.dump(self.meta_dict, meta_file)
+    def _save_entry(self, entry):
+
+        id = entry['meta']['id']
+        entry_path = os.path.join(self.dir, ".data", id + '.json')
+
+        with open(entry_path, 'w+') as file:
+            json.dump(entry, file)
+
+    def _save_word(self, word, entries):
+        cur = self.meta_dict.cursor()
+
+        for entry in entries:
+            id = entry['meta']['id']
+
+            for stem in entry['meta']['stems']:
+                cur.execute(
+                    "DELETE FROM words WHERE word = :word AND entry_id = :id",
+                    {"word": stem, "id": id}
+                )
+                cur.execute(
+                    "DELETE FROM word_entries WHERE entry_id = :id",
+                    {"id": id}
+                )
+            
+                cur.execute(
+                    "INSERT INTO words (word, entry_id) VALUES (:word, :id)",
+                    {"word": stem, "id": id}
+                )
+                cur.execute(
+                    "INSERT INTO word_entries (entry_id, file) VALUES (:id, :path)",
+                    {"id": id, "path": id + '.json'}
+                )
+
+            self._save_entry(entry)
+        
+        cur.close()
+        self.meta_dict.commit()
 
     def remove_word(self, word):
-        word_path = os.path.join(self.dir, ".data", word + '.json')
-        assert os.path.exists(word_path)
-        os.remove(word_path)
+        cur = self.meta_dict.cursor()
+        cur.execute("DELETE FROM words WHERE word = :word", {"word": word})
+        cur.close()
 
-        self.meta_dict.pop(word)
+        self.meta_dict.commit()
 
-        with open(self.meta_dict_path, 'w') as meta_file:
-            json.dump(self.meta_dict, meta_file)
+    def clean_dictionary(self):
+        cur = self.meta_dict.cursor()
 
-    def clear_dictionary(self):
+        cur.execute("""
+        SELECT file 
+        FROM word_entries 
+        LEFT JOIN words 
+            ON word_entries.entry_id = words.entry_id 
+        WHERE words.word IS NULL
+        """)
+
+        files_to_delete = cur.fetchall()
+
+        cur.execute("""
+        DELETE FROM word_entries
+        WHERE file IN (
+            SELECT file 
+            FROM word_entries 
+            LEFT JOIN words 
+            ON word_entries.entry_id = words.entry_id 
+            WHERE words.word IS NULL
+        )
+        """)
+
+        cur.close()
+        self.meta_dict.commit()
+
+        for file in files_to_delete:
+            os.remove(os.path.join(self.dir, '.data', file))
+
+
+    def purge_dictionary(self):
         shutil.rmtree(os.path.join(self.dir, ".data"))
         
-        self.meta_dict = {}
+        cur = self.meta_dict.cursor()
 
-        with open(self.meta_dict_path, 'w') as meta_file:
-            json.dump(self.meta_dict, meta_file)
+        cur.execute('DROP TABLE IF EXISTS words')
+        cur.execute('DROP TABLE IF EXISTS word_entries')
 
 
     def check_word(self, word, force=False, prompt=True, save=True):
-        # to do: adopt to one to many relation
+        
         if not force:
             entry = self._check_cache(word)
             from_cache = True
@@ -230,8 +328,13 @@ class DictionaryConnection:
             entry = None
         
         if entry is None:
-            entry = self._check_dictionary(word) # to do: add error handling
-            from_cache = False
+            try:
+                entry = self._check_dictionary(word) # to do: add error handling
+                from_cache = False
+            except ValueError:
+                entry = word + 'not found'
+                from_cache = False
+                save = False
 
         if prompt:
             print(entry)
@@ -243,36 +346,21 @@ if __name__ == "__main__":
 
     Crw = Crawler()
     Crw.connect()
-
-    print(Crw.last_check)
-    Crw.last_check = 0
     
-    query1 = Crw.get_queries()
-    print(len(query1))
-
-    print(Crw.last_check)
-    #queries = Crw.get_queries()
+    queries = Crw.get_queries()
 
     Crw.disconnect()
-
-    Crw2 = Crawler()
-
-    print(Crw2.last_check)
-    Crw2.connect()
-
-    query2 = Crw2.get_queries()
-    print(len(query2))
-
-    print(Crw2.last_check)
     
-    #MW = DictionaryConnection()
+    MW = DictionaryConnection()
 
-    #for word in queries[:5]:
-    #    MW.check_word(word)
+    # for word in queries[:5]:
+    #     MW.check_word(word)
+
+    MW.check_word('slightly')
+    MW.check_word('slightest')
+    MW.check_word('fadfdfa')
+
+    MW.meta_dict.commit()
+    MW.meta_dict.close()
 
     #MW.clear_dictionary()
-
-
-
-
-
