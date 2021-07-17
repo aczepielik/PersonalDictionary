@@ -181,6 +181,9 @@ class DictionaryConnection:
             print(e)
             exit()
 
+    def disconnet(self):
+        self.meta_dict.close()
+
 
     def _check_dictionary(self, word, endpoint='Dictionary'):
         url = self.endpoints[endpoint]
@@ -318,6 +321,9 @@ class DictionaryConnection:
         cur.execute('DROP TABLE IF EXISTS words')
         cur.execute('DROP TABLE IF EXISTS word_entries')
 
+        cur.close()
+        self.meta_dict.commit()
+
 
     def check_word(self, word, force=False, prompt=True, save=True):
         
@@ -342,25 +348,69 @@ class DictionaryConnection:
         if save and not from_cache:
             self._save_word(word, entry)
 
-if __name__ == "__main__":
+    def count_words(self):
+        cur = self.meta_dict.cursor()
 
+        cur.execute('SELECT COUNT(*) total FROM words')
+        count = cur.fetchall()
+
+        if len(count) == 0:
+            count = 0
+        else:
+            count = count[0][0]
+
+        cur.close()
+        return count
+
+    def list_words(self, n):
+        cur = self.meta_dict.cursor()
+
+        cur.execute('SELECT word FROM words LIMIT :n', {"n": n})
+        words = cur.fetchall()
+
+        cur.close()
+        return words
+
+#-- interface
+
+@click.group()
+def cli():
+    pass
+
+@cli.command(help="Scan the browser's history in search for English words checked in online translators.")
+@click.option('-f', '--from', 'from_timestamp',
+    type=click.DateTime(formats=["%Y-%m-%d"]),
+    help="When to start scanning browser history from.")
+def scan(from_timestamp):
     Crw = Crawler()
-    Crw.connect()
-    
-    queries = Crw.get_queries()
-
-    Crw.disconnect()
-    
     MW = DictionaryConnection()
 
-    # for word in queries[:5]:
-    #     MW.check_word(word)
+    Crw.connect()
 
-    MW.check_word('slightly')
-    MW.check_word('slightest')
-    MW.check_word('fadfdfa')
+    queries = Crw.get_queries(from_timestamp)
 
-    MW.meta_dict.commit()
-    MW.meta_dict.close()
+    for word in queries:
+        MW.check_word(word)
+    print(from_timestamp)
+    Crw.disconnect()
+    MW.disconnet()
 
-    #MW.clear_dictionary()
+@cli.command(help="Check the English word in online dictionary")
+@click.argument('word')
+@click.option('--force-online', 'online', is_flag=True, default=False)
+@click.option('--prompt/--no-prompt', 'prompt', default=True)
+@click.option('--save/--no-save', 'save', default=True)
+def check(word, online, prompt, save):
+    MW = DictionaryConnection()
+    MW.check_word(word, online, prompt, save)
+    MW.disconnet()
+
+@cli.command(help='Count words in the cached dictionary.')
+def count_words():
+    MW = DictionaryConnection()
+    print(MW.count_words())
+    MW.disconnet()
+
+
+if __name__ == "__main__":
+    cli()
