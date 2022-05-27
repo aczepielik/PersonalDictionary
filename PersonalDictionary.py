@@ -7,15 +7,28 @@ import shutil
 import requests
 import json
 import click
-from datetime import datetime
+from datetime import datetime, time
 from urllib.parse import urlparse, parse_qs, unquote_plus
 import nltk
 from nltk import word_tokenize
 from nltk.corpus import stopwords
+import rich
+import re
   
 
 STOP_WORDS = stopwords.words('english')
 
+
+bold = lambda x: '[bold]' + x + '[/bold]'
+italic = lambda x: '[italic]' + x + '[/italic]'
+
+def main_tuple_style(tup):
+    return bold(tup[0]) + ', ' + italic(tup[1])
+
+def secondary_tuples_style(tup_list):
+    single_tuple = lambda tup: tup[0] + ', ' + italic(tup[1])
+
+    return '; '.join(list(map(single_tuple, tup_list)))
 
 def get_firefox_config():
     firefox_config = configparser.ConfigParser()
@@ -95,7 +108,9 @@ class Crawler:
                 file.write(str(self.last_check))
 
     def _get_addresses_from_site(self, url, timestamp):
-
+        
+        if isinstance(timestamp, datetime):
+            timestamp = timestamp.timestamp()
         assert self.connected
         cur = self.conn.cursor()
 
@@ -142,6 +157,14 @@ class DictionaryConnection:
         'Dictionary': 'https://www.dictionaryapi.com/api/v3/references/collegiate/json/',
         'Thesaurus': 'https://www.dictionaryapi.com/api/v3/references/thesaurus/json/'
     }
+
+    style_dict = {
+        'main': main_tuple_style,
+        'secondary': secondary_tuples_style,
+        'definitions': lambda x: '\n'.join(x)
+    }
+
+    regex_filter = re.compile('[,\.!?/~]')
 
     def __init__(self, dir=os.path.join(os.environ["HOME"], '.personaldictionary')):
         api_config_path = os.path.join(dir, ".keys")
@@ -239,7 +262,7 @@ class DictionaryConnection:
 
     def _save_entry(self, entry):
 
-        id = entry['meta']['id']
+        id = self.regex_filter.sub('', entry['meta']['id'])
         entry_path = os.path.join(self.dir, ".data", id + '.json')
 
         with open(entry_path, 'w+') as file:
@@ -249,9 +272,11 @@ class DictionaryConnection:
         cur = self.meta_dict.cursor()
 
         for entry in entries:
-            id = entry['meta']['id']
+            id = self.regex_filter.sub('', entry['meta']['id'])
 
-            for stem in entry['meta']['stems']:
+            stems = set(entry['meta']['stems'] + [word])
+
+            for stem in stems:
                 cur.execute(
                     "DELETE FROM words WHERE word = :word AND entry_id = :id",
                     {"word": stem, "id": id}
@@ -324,6 +349,21 @@ class DictionaryConnection:
         cur.close()
         self.meta_dict.commit()
 
+    def parse_entry(self, entry):
+        parsed = {
+            'main': (entry.get('meta', {}).get('stems',[''])[0], entry.get('fl', '')),
+            'secondary': [(ure.get('ure', ''), ure.get('fl', '')) for ure in entry.get('uros', [])],
+            'definitions': [str(i+1) + '. ' + shortdef.capitalize()\
+                 for i, shortdef in enumerate(entry.get('shortdef',[]))]
+        }
+
+        return parsed
+
+    def print_word(self, parsed):
+        for key, val in parsed.items():
+            styled_text = self.style_dict[key](val)
+            rich.print(styled_text)
+
 
     def check_word(self, word, force=False, prompt=True, save=True):
         
@@ -335,15 +375,27 @@ class DictionaryConnection:
         
         if entry is None:
             try:
-                entry = self._check_dictionary(word) # to do: add error handling
+                entry = self._check_dictionary(word)
+
+                if not isinstance(entry, list):
+                    raise ValueError
+                elif not isinstance(entry[0], dict):
+                    raise ValueError
+                elif entry[0].get('meta', None) is None:
+                    raise ValueError
+                else:
+                    pass
                 from_cache = False
             except ValueError:
-                entry = word + 'not found'
-                from_cache = False
-                save = False
+                print(word + ' not found')
+                return 0
 
         if prompt:
-            print(entry)
+            print('')
+            for single_entry in entry:
+                parsed = self.parse_entry(single_entry)
+                self.print_word(parsed)
+                print('')
         
         if save and not from_cache:
             self._save_word(word, entry)
@@ -411,6 +463,14 @@ def count_words():
     print(MW.count_words())
     MW.disconnet()
 
+@cli.command(help='Show n words from the local cache')
+@click.argument('n_words')
+def list_words(n_words=5):
+    MW = DictionaryConnection()
+    print(MW.list_words(n_words))
+    MW.disconnet()
+
 
 if __name__ == "__main__":
     cli()
+    #check('computer', False, True, False)
