@@ -1,10 +1,6 @@
 #!/home/adam/anaconda3/envs/personaldict/bin/python
 
 import click
-from datetime import datetime, time
-import re
-
-from styles import main_tuple_style, secondary_tuples_style
 from crawlers import FirefoxCrawler, ChromeCrawler
 from dictionaryconnection import DictionaryConnection
 

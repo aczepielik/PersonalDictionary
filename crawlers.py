@@ -2,8 +2,7 @@ import configparser
 import os
 import sqlite3
 from urllib.parse import urlparse, parse_qs, unquote_plus
-from datetime import datetime, time
-import nltk
+from datetime import datetime
 from nltk import word_tokenize
 from nltk.corpus import stopwords
 
